@@ -1,0 +1,8 @@
+name: NeuralCraft
+version: 1.0
+main: io.github.aqmeraamir.NeuralCraft
+
+commands:
+  digit:
+    description: Predicts the digit you have drawn on the canvas.
+    usage: /digit <predict | canvas>
