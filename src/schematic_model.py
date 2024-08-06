@@ -14,14 +14,14 @@ from torch.utils.data import DataLoader, Dataset
 
 # constants
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCHEM_SHAPE = (16, 16, 16)
+SCHEM_SHAPE = (32, 32, 32)
 
 T = 200
 LOAD_MODEL = False
 
 # hyperparameters
 EPOCHS = 10000
-BATCH_SIZE = 64
+BATCH_SIZE = 5
 LEARNING_RATE = 0.001
 
 # ---------------------------------------
@@ -189,8 +189,8 @@ class UNet3D(nn.Module):
     def __init__(self):
         super().__init__()
         in_channels = 1
-        down_channels = (64, 128, 256, 512)
-        up_channels = (512, 256, 128, 64)
+        down_channels = (64, 128, 256, 512, 1024)
+        up_channels = (1024, 512, 256, 128, 64)
         out_channels = 1
         time_emb_dim = 32
 
