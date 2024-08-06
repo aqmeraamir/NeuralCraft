@@ -1,6 +1,5 @@
 '''
 '''
-print('file running')
 
 # libraries & modules
 import math
@@ -26,6 +25,8 @@ EPOCHS = 10000
 BATCH_SIZE = 5
 LEARNING_RATE = 0.001
 
+print('initialising model...\n')
+
 # ---------------------------------------
 # Configure dataset(s)
 # ---------------------------------------
@@ -46,6 +47,7 @@ class SchematicsDataset(Dataset):
 
         return blocks_tensor
     
+
 def transform_blocks(blocks, original_dimensions, target_dimensions=SCHEM_SHAPE):
     '''
     transforms the 'blocks' array from a .schematic file to specified dimensions, and turns it into a tensor for pytorch
@@ -304,8 +306,7 @@ def sample_schem():
 
 
 # configuring the devices / metal support for mac gpu
-device = torch.device("cuda") if torch.backends.cuda.is_available() else torch.device("cpu")
-#device = torch.device("cpu")
+device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 optimizer = Adam(schem_model.parameters(), LEARNING_RATE)
 schem_model.to(device)
