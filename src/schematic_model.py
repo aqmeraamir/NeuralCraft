@@ -21,7 +21,7 @@ LOAD_MODEL = False
 
 # hyperparameters
 EPOCHS = 10000
-BATCH_SIZE = 1
+BATCH_SIZE = 64
 LEARNING_RATE = 0.001
 
 # ---------------------------------------
@@ -153,6 +153,7 @@ class SinusoidalPositionalEmbeddings(nn.Module):
         embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
         return embeddings
 
+
 class Block3D(nn.Module):
     def __init__(self, in_ch, out_ch, time_emp_dim, up=False):
         super().__init__()
@@ -184,7 +185,6 @@ class Block3D(nn.Module):
         
         return self.transform(h)
     
-
 class UNet3D(nn.Module):
     def __init__(self):
         super().__init__()
@@ -238,7 +238,7 @@ num_params_schem = sum(p.numel() for p in schem_model.parameters())
 # Training functions
 # ---------------------------------------
 
-def save_checkpoint(state, filepath="src/saved_models/checkpoint.pth.tar"):
+def save_checkpoint(state, filepath="checkpoint.pth.tar"):
     print("=> Saving checkpoint")
     torch.save(state, filepath)
 
@@ -296,14 +296,9 @@ def sample_schem():
     print(f'=> output schematic created')
 
 
-
-
-
-
 # ---------------------------------------
 # Training - 3D Diffusion Model for MC Schematics
 # ---------------------------------------         
-
 
 
 # configuring the devices / metal support for mac gpu
