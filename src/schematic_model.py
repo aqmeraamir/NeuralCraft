@@ -304,7 +304,7 @@ def sample_schem():
 
 
 # configuring the devices / metal support for mac gpu
-device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda") if torch.backends.cuda.is_available() else torch.device("cpu")
 #device = torch.device("cpu")
 
 optimizer = Adam(schem_model.parameters(), LEARNING_RATE)
