@@ -23,7 +23,7 @@ IMG_SIZE = 64
 
 LOAD_MODEL = False
 
-T = 1000
+T = 200
 
 # hyperparameters
 EPOCHS = 10000

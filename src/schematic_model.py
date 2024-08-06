@@ -17,12 +17,12 @@ from torch.utils.data import DataLoader, Dataset
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCHEM_SHAPE = (32, 32, 32)
 
-T = 200
+T = 1000
 LOAD_MODEL = False
 
 # hyperparameters
 EPOCHS = 10000
-BATCH_SIZE = 5
+BATCH_SIZE = 1
 LEARNING_RATE = 0.001
 
 print('initialising model...\n')
