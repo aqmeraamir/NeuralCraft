@@ -1,5 +1,7 @@
 '''
 '''
+print('file running')
+
 # libraries & modules
 import math
 import numpy as np
@@ -302,8 +304,8 @@ def sample_schem():
 
 
 # configuring the devices / metal support for mac gpu
-device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
-device = torch.device("cpu")
+device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+#device = torch.device("cpu")
 
 optimizer = Adam(schem_model.parameters(), LEARNING_RATE)
 schem_model.to(device)

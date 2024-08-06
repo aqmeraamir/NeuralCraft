@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY ./src ./src
 
-CMD ["python", "./src/schematic_model.py"]
+ENTRYPOINT ["python", "./src/schematic_model.py"]
