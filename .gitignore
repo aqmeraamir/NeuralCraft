@@ -1,3 +1,4 @@
 .DS_Store
+.pyc
 src/data/stanford_cars/
 src/saved_models/
