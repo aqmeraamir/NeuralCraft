@@ -28,7 +28,7 @@ CKPT_FILEPATH = "ckpt.pt"
 
 
 # hyperparameters
-PREFERRED_DEVICE = "cuda"
+PREFERRED_DEVICE = "cpu"
 T = 1000                                                                                                                 
 EPOCHS = 10000
 BATCH_SIZE = 1
@@ -66,13 +66,11 @@ def transform_blocks(blocks, original_dimensions, target_dimensions=SCHEM_SHAPE)
     transforms the 'blocks' array from a .schematic file to specified dimensions, and turns it into a tensor for pytorch
     '''
     blocks = [-1 if id == 0 else 1 for id in blocks] # normalize values to -1 and 1 respectively
-
-    blocks_tensor = torch.tensor(blocks, dtype=torch.float) # convert to tensor
-    blocks_tensor = blocks_tensor.view(original_dimensions) # convert to 3d array
-    blocks_tensor = blocks_tensor.unsqueeze(0) # add channel dimension 
-
     
-    blocks_tensor = blocks_tensor.unsqueeze(0) # add batch dimension
+    blocks_tensor = torch.tensor(blocks, dtype=torch.float) # convert to tensor
+    blocks_tensor = blocks_tensor.view(original_dimensions) # convert to 3d array 
+
+    blocks_tensor = blocks_tensor.unsqueeze(0).unsqueeze(0)
     blocks_tensor = F.interpolate(blocks_tensor, size=target_dimensions, mode='nearest') # resize 
 
     return blocks_tensor[0, :, :, :]
@@ -91,9 +89,7 @@ def create_schematic_from_tensor(filepath, blocks_tensor, dimensions=SCHEM_SHAPE
         data = data = np.zeros_like(blocks) # create an empty array of 0s the same size as blocks
 
     #ensure no invalid ids
-    #blocks = np.where(blocks < 0, 0, np.round(blocks)).astype(int)
-    blocks = (blocks + 1) / 2
-    blocks = np.where(np.round(blocks) == 1, 1, 0).astype(int)
+    blocks = np.where(blocks < 0, 0, 1).astype(int)
     
     if np.prod(dimensions) != len(blocks):
         print(f"Error creating schematic ({filepath}), invalid dimensions for the given blocks array")
@@ -276,13 +272,17 @@ class Up(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, ch_in=1, ch_out=1, time_dim=256, device=PREFERRED_DEVICE):
+    def __init__(self, ch_out=1, time_dim=256, id_embedding_dim=16, device=PREFERRED_DEVICE):
         super().__init__()
         self.device = device
         self.time_dim = time_dim
 
+        # embedding layer for id's
+        self.id_embedding = nn.Embedding(2, id_embedding_dim)
+        self.id_embedding_dim = id_embedding_dim
+
         # downsampling
-        self.input = DoubleConv(ch_in, 64)
+        self.input = DoubleConv(id_embedding_dim, 64)
         self.down1 = Down(64, 128)
         self.sa1 = SelfAttention(128, 32)
         self.down2 = Down(128, 256)
@@ -317,6 +317,11 @@ class UNet(nn.Module):
     def forward(self, x, t):
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim)
+
+        x = torch.where(x==-1, 0, 1)
+        x = self.id_embedding(x)
+        x = x.permute(0, 5, 2, 3, 4, 1).squeeze(-1)
+
 
         x1 = self.input(x)
         x2 = self.down1(x1, t)
@@ -383,9 +388,7 @@ l = len(dataloader)
 start_epoch = 0
 if LOAD_MODEL: start_epoch = load_checkpoint(CKPT_FILEPATH, model, optimizer)
 
-
-
-create_schematic_from_tensor(f"runs/{RUN_NAME}/results/expected.schematic", next(iter(dataloader))[0])
+#create_schematic_from_tensor(f"TARGET.schematic", next(iter(dataloader))[0])
 
 
 if TRAIN:
