@@ -29,7 +29,7 @@ CKPT_FILEPATH = "ckpt.pt"
 
 # hyperparameters
 PREFERRED_DEVICE = "cpu"
-T = 300                                                                                                                  
+T = 1000                                                                                                                 
 EPOCHS = 10000
 BATCH_SIZE = 1
 LEARNING_RATE = 0.0003
