@@ -20,15 +20,15 @@ from torch.utils.tensorboard import SummaryWriter
 
 # constants
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCHEM_SHAPE = (32, 32, 32)
+SCHEM_SHAPE = (8,8,8)
 RUN_NAME = "stable-diffusion"
 TRAIN = True
 LOAD_MODEL = False
-CKPT_FILEPATH = "runs/stable-diffusion/models/ckpt.pt"
+CKPT_FILEPATH = "ckpt.pt"
 
 
 # hyperparameters
-PREFERRED_DEVICE = "cuda"
+PREFERRED_DEVICE = "cpu"
 T = 300                                                                                                                  
 EPOCHS = 10000
 BATCH_SIZE = 1
@@ -384,6 +384,10 @@ start_epoch = 0
 if LOAD_MODEL: start_epoch = load_checkpoint(CKPT_FILEPATH, model, optimizer)
 
 
+sampled_schematics = diffusion.sample(model, 3)
+
+create_schematic_from_tensor(f"runs/{RUN_NAME}/results/expected.schematic", next(iter(dataloader))[0])
+
 
 if TRAIN:
     setup()
@@ -406,10 +410,10 @@ if TRAIN:
             writer.add_scalar("Loss", loss.item(), global_step=epoch * l + i)
 
         if epoch % 100 == 0:
-            sampled_schematics = diffusion.sample(model)
+            sampled_schematics = diffusion.sample(model, 3)
      
-            #create_schematic_from_tensor(f"runs/{RUN_NAME}/results/expected.schematic", next(iter(dataloader))[0])
-            create_schematic_from_tensor(f"runs/{RUN_NAME}/results/{epoch}.schematic", sampled_schematics)
+            for sampled_schematic, i in enumerate(sampled_schematics):
+                create_schematic_from_tensor(f"runs/{RUN_NAME}/results/{epoch}-{i}.schematic", sampled_schematic)
 
             state = {
                 'state_dict': model.state_dict(), 
