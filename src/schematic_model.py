@@ -28,7 +28,7 @@ CKPT_FILEPATH = "ckpt.pt"
 
 
 # hyperparameters
-PREFERRED_DEVICE = "cpu"
+PREFERRED_DEVICE = "cuda"
 T = 1000                                                                                                                 
 EPOCHS = 10000
 BATCH_SIZE = 1
@@ -384,7 +384,6 @@ start_epoch = 0
 if LOAD_MODEL: start_epoch = load_checkpoint(CKPT_FILEPATH, model, optimizer)
 
 
-sampled_schematics = diffusion.sample(model, 3)
 
 create_schematic_from_tensor(f"runs/{RUN_NAME}/results/expected.schematic", next(iter(dataloader))[0])
 
@@ -412,7 +411,7 @@ if TRAIN:
         if epoch % 100 == 0:
             sampled_schematics = diffusion.sample(model, 3)
      
-            for sampled_schematic, i in enumerate(sampled_schematics):
+            for i, sampled_schematic in enumerate(sampled_schematics):
                 create_schematic_from_tensor(f"runs/{RUN_NAME}/results/{epoch}-{i}.schematic", sampled_schematic)
 
             state = {
