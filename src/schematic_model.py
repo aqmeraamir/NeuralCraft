@@ -1,35 +1,48 @@
 '''
 '''
 
-# libraries & modules
-import math
-import numpy as np
+# libraries and modules
 import os
+import logging
+
+from matplotlib import pyplot as plt
+from tqdm import tqdm
 from schematic_manager import read_schematic, create_schematic
+import numpy as np
+
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-from torch.optim import Adam
+from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.tensorboard import SummaryWriter
+
 
 # constants
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCHEM_SHAPE = (32, 32, 32)
-
-T = 1000
+SCHEM_SHAPE = (8, 8, 8)
+RUN_NAME = "stable-diffusion"
+TRAIN = True
 LOAD_MODEL = False
+CKPT_FILEPATH = "runs/stable-diffusion/models/ckpt.pt"
+
 
 # hyperparameters
+PREFERRED_DEVICE = "cpu"
+T = 300                                                                                                                  
 EPOCHS = 10000
 BATCH_SIZE = 1
-LEARNING_RATE = 0.001
+LEARNING_RATE = 0.0003
 
-print('initialising model...\n')
 
-# ---------------------------------------
+# initialise logging
+logging.basicConfig(format="%(asctime)s - %(levelname)s: %(message)s", level=logging.INFO, datefmt="%I:%M:%S")
+
+
+# --------------------------------------
 # Configure dataset(s)
 # ---------------------------------------
+
 
 class SchematicsDataset(Dataset):
     def __init__(self, root, transform=None):
@@ -45,36 +58,42 @@ class SchematicsDataset(Dataset):
         blocks, dimensions, _ = read_schematic(schematic_path) 
         blocks_tensor = transform_blocks(blocks, dimensions)
 
-        return blocks_tensor
-    
+        return blocks_tensor, 0
+
 
 def transform_blocks(blocks, original_dimensions, target_dimensions=SCHEM_SHAPE):
     '''
     transforms the 'blocks' array from a .schematic file to specified dimensions, and turns it into a tensor for pytorch
     '''
     blocks = [-1 if id == 0 else 1 for id in blocks] # normalize values to -1 and 1 respectively
+
     blocks_tensor = torch.tensor(blocks, dtype=torch.float) # convert to tensor
     blocks_tensor = blocks_tensor.view(original_dimensions) # convert to 3d array
-    blocks_tensor = blocks_tensor.unsqueeze(0).unsqueeze(0) # add channel dimension
+    blocks_tensor = blocks_tensor.unsqueeze(0) # add channel dimension 
+
+    
+    blocks_tensor = blocks_tensor.unsqueeze(0) # add batch dimension
     blocks_tensor = F.interpolate(blocks_tensor, size=target_dimensions, mode='nearest') # resize 
 
     return blocks_tensor[0, :, :, :]
 
 def create_schematic_from_tensor(filepath, blocks_tensor, dimensions=SCHEM_SHAPE, data=None):
     # ensure tensor is on cpu
-    blocks_tensor = blocks_tensor.cpu().numpy()
+    blocks = blocks_tensor.cpu().numpy()
 
     # remove batch and channel dimensions + convert to 1d array
-    if len(blocks_tensor.shape) == 5 :
-        blocks_tensor = blocks_tensor[0, 0, :, :, :].flatten()
-    elif len(blocks_tensor.shape) == 4:
-        blocks_tensor = blocks_tensor[0, :, :, :].flatten()
+    if len(blocks.shape) == 5 :
+        blocks = blocks[0, 0, :, :, :].flatten()
+    elif len(blocks.shape) == 4:
+        blocks = blocks[0, :, :, :].flatten()
 
     if data is None: 
-        data = data = np.zeros_like(blocks_tensor) # create an empty array of 0s the same size as blocks
+        data = data = np.zeros_like(blocks) # create an empty array of 0s the same size as blocks
 
-    # ensure no invalid values (<0)are in the blocks array
-    blocks = np.where(blocks_tensor < 0, 0, np.round(blocks_tensor)).astype(int)
+    #ensure no invalid ids
+    #blocks = np.where(blocks < 0, 0, np.round(blocks)).astype(int)
+    blocks = (blocks + 1) / 2
+    blocks = np.where(np.round(blocks) == 1, 1, 0).astype(int)
     
     if np.prod(dimensions) != len(blocks):
         print(f"Error creating schematic ({filepath}), invalid dimensions for the given blocks array")
@@ -83,264 +102,325 @@ def create_schematic_from_tensor(filepath, blocks_tensor, dimensions=SCHEM_SHAPE
     create_schematic(filepath, blocks, data, dimensions)
 
 
-# load the schematics dataset & set the data loader
-schematics_dataset = SchematicsDataset(root="src/data/schematics_dataset")
-schem_data_loader = DataLoader(schematics_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
+schem_dataset = SchematicsDataset(root="src/data/schematics_dataset") 
+dataloader = DataLoader(schem_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
 
-#create_schematic_from_tensor("src/data/output_schematics/test.schematic", schematics_dataset[0], SCHEM_SHAPE)
 
 
 # ---------------------------------------
 # Forward Process - Noise Schedular
 # ---------------------------------------
 
-def cosine_beta_schedule(t, start=0.0001, end=0.02):
-    '''
-    returns a tensor containing the beta value for each timestep
-    '''
-    steps = torch.linspace(0, t, t)
-    betas = start + 0.5 * (end - start) * (1 - torch.cos(math.pi * steps / t))
-    return betas
+class NoiseSchedular:
+    def __init__(self, beta_start=0.0001, beta_end=0.02):
+        self.beta_start = beta_start
+        self.beta_end = beta_end
+        self.device = PREFERRED_DEVICE
 
-def get_index_from_list(vals, t, x_shape):
-    batch_size = t.shape[0]
-    out = vals.gather(-1, t.cpu())
-    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
+        # beta schedule 
+        self.betas = self.linear_noise_schedule()
 
-def forward_diffusion_sample(x_0, t, device="mps"):
-    """
-    Returns a noisy version of an image at a specific timestep 
-    """
-    noise = torch.randn_like(x_0)
-    sqrt_alphas_cumprod_t = get_index_from_list(sqrt_alphas_cumprod, t, x_0.shape)
-    sqrt_one_minus_alphas_cumprod_t = get_index_from_list(sqrt_one_minus_alphas_cumprod, t, x_0.shape)
+        # pre-calculate the necessary terms for noise calculations
+        self.alphas = 1. - self.betas
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
 
-    # mean + variance
-    return sqrt_alphas_cumprod_t.to(device) * x_0.to(device) + sqrt_one_minus_alphas_cumprod_t.to(device) * noise.to(device), noise.to(device)
+    def linear_noise_schedule(self):
+        return torch.linspace(self.beta_start, self.beta_end, T).to(self.device)
+
+    def noise_schematics(self, x, t):
+        """
+        Returns a noisy version of a schematic at a specific timestep 
+        """
+        sqrt_alpha_hat = torch.sqrt(self.alphas_cumprod[t])[:, None, None, None, None]
+        sqrt_one_minus_alphas_cumprod = torch.sqrt(1 - self.alphas_cumprod[t])[:, None, None, None, None]
+        noise = torch.randn_like(x)
+        return sqrt_alpha_hat * x + sqrt_one_minus_alphas_cumprod * noise, noise
+
+    def sample_timesteps(self, n):
+        """
+        Returns random timestep(s)
+        """
+        return torch.randint(low=1, high=T, size=(n,))
+
+    def sample(self, model, n=1):
+        """
+        Samples schematics using the model
+        """
+        logging.info(f"Sampling {n} new schematic(s)...")
+        model.eval()
+        with torch.no_grad():
+            x = torch.randn((n, 1, *SCHEM_SHAPE)).to(self.device)
+            for i in tqdm(reversed(range(1, T))):
+                t = (torch.ones(n) * i).long().to(self.device)
+                predicted_noise = model(x, t)
+                alphas = self.alphas[t][:, None, None, None, None]
+                alphas_cumprod = self.alphas_cumprod[t][:, None, None, None, None]
+                betas = self.betas[t][:, None, None, None, None]
+                if i > 1:
+                    noise = torch.randn_like(x)
+                else:
+                    noise = torch.zeros_like(x)
+                x = 1 / torch.sqrt(alphas) * (x - ((1 - alphas) / (torch.sqrt(1 - alphas_cumprod))) * predicted_noise) + torch.sqrt(betas) * noise
+        model.train()
+
+        x = torch.clamp(x, -1.0, 1.0) # normalise between -1 and 1
+        return x
 
 
-# beta schedule
-betas = cosine_beta_schedule(t=T)
-
-# pre-calculate the necessary terms for noise calculations
-alphas = 1. - betas
-alphas_cumprod = torch.cumprod(alphas, axis=0)
-alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
-sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
-sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod)
-posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
-
-
-# sample noise
-# t = torch.Tensor([0]).type(torch.int64)
-# noisy_blocks, noise = forward_diffusion_sample(schematics_dataset[1], t)
-# create_schematic_from_tensor("src/data/output_schematics/test.schematic", schematics_dataset[0], SCHEM_SHAPE)
-
-
+# --------------------------------------
+# Backward Process - The U-Net
 # ---------------------------------------
-# Backward Process - The 3D U-Net
-# ---------------------------------------
 
-class SinusoidalPositionalEmbeddings(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, time):
-        device = time.device
-        half_dim = self.dim // 2
-        embeddings = math.log(10000) / (half_dim - 1)
-        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
-        embeddings = time[:, None] * embeddings[None, :]
-        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
-        return embeddings
-
-
-class Block3D(nn.Module):
-    def __init__(self, in_ch, out_ch, time_emp_dim, up=False):
-        super().__init__()
-        self.time_mlp = nn.Linear(time_emp_dim, out_ch)
-
-        if up:
-            self.conv1 = nn.Conv3d(2*in_ch, out_ch, 3, padding=1)
-            self.transform = nn.ConvTranspose3d(out_ch, out_ch, 4, 2, 1)
-        else:
-            self.conv1 = nn.Conv3d(in_ch, out_ch, 3, padding=1)
-            self.transform = nn.Conv3d(out_ch, out_ch, 4, 2, 1)
-
-        self.conv2 = nn.Conv3d(out_ch, out_ch, 3, padding=1)
-        self.bnorm1 = nn.BatchNorm3d(out_ch)
-        self.bnorm2 = nn.BatchNorm3d(out_ch)
-        self.relu = nn.ReLU()
-    
-    def forward(self, x, t):
-        # convolution 1
-        h = self.bnorm1(self.relu(self.conv1(x)))
-
-        # creating and time embedding channel
-        time_emb = self.relu(self.time_mlp(t))
-        time_emb = time_emb[(...,) + (None, ) * 3] # add 3 none dimensions
-        h += time_emb
-
-        # convolution 2
-        h = self.bnorm2(self.relu(self.conv2(h)))
-        
-        return self.transform(h)
-    
-class UNet3D(nn.Module):
-    def __init__(self):
-        super().__init__()
-        in_channels = 1
-        down_channels = (64, 128, 256, 512, 1024)
-        up_channels = (1024, 512, 256, 128, 64)
-        out_channels = 1
-        time_emb_dim = 32
-
-        # time embedding
-        self.time_mlp = nn.Sequential(
-            SinusoidalPositionalEmbeddings(time_emb_dim), 
-            nn.Linear(time_emb_dim, time_emb_dim),
-            nn.ReLU()
+class SelfAttention(nn.Module):
+    def __init__(self, ch, size):
+        super(SelfAttention, self).__init__()
+        self.ch = ch
+        self.size = size
+        self.attention = nn.MultiheadAttention(ch, 4, batch_first=True)
+        self.layer_norm = nn.LayerNorm([ch])
+        self.feed_forward_sub = nn.Sequential(
+            nn.LayerNorm([ch]),
+            nn.Linear(ch, ch),
+            nn.GELU(),
+            nn.Linear(ch, ch),
         )
+
+    def forward(self, x):
         
-        self.conv0 = nn.Conv3d(in_channels, down_channels[0], 3, padding=1)
+        # Infer `self.size` dynamically
+        spatial_dims = x.shape[2:]  # Get spatial dimensions (D, H, W)
+        num_elements = spatial_dims[0] * spatial_dims[1] * spatial_dims[2]
 
-        self.downs = nn.ModuleList()
-        for i in range(len(down_channels)-1):
-            self.downs.append(Block3D(down_channels[i], down_channels[i+1], time_emb_dim))
+        # Reshape: (batch, channel, depth*height*width) -> (batch, num_elements, channel)
+        x = x.view(-1, self.ch, num_elements).swapaxes(1, 2)
 
-        self.ups = nn.ModuleList()
-        for i in range(len(up_channels)-1):
-            self.ups.append(Block3D(up_channels[i], up_channels[i+1], time_emb_dim, up=True))
+        # Apply layer norm and attention
+        x_ln = self.layer_norm(x)
+        attention_value, _ = self.attention(x_ln, x_ln, x_ln)
+        attention_value = attention_value + x
+        attention_value = self.feed_forward_sub(attention_value) + attention_value
 
-        self.output = nn.Conv3d(up_channels[-1], out_channels, kernel_size=1)
-    
+        # Reshape back to (batch, channel, depth, height, width)
+        return attention_value.swapaxes(2, 1).view(-1, self.ch, *spatial_dims)
+
+
+class DoubleConv(nn.Module):
+    def __init__(self, in_ch, out_ch, mid_ch=None, residual=False):
+        super().__init__()
+        self.residual = residual
+        if not mid_ch:
+            mid_ch = out_ch
+        self.double_conv = nn.Sequential(
+            nn.Conv3d(in_ch, mid_ch, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(1, mid_ch),
+            nn.GELU(),
+            nn.Conv3d(mid_ch, out_ch, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(1, out_ch),
+        )
+
+    def forward(self, x):
+        if self.residual:
+            return F.gelu(x + self.double_conv(x))
+        else:
+            return self.double_conv(x)
+
+
+class Down(nn.Module):
+    def __init__(self, in_ch, out_ch, emb_dim=256):
+        super().__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool3d(2),
+            DoubleConv(in_ch, in_ch, residual=True),
+            DoubleConv(in_ch, out_ch),
+        )
+
+        self.emb_layer = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(
+                emb_dim,
+                out_ch
+            ),
+        )
+
     def forward(self, x, t):
-        t = self.time_mlp(t)
-        x = self.conv0(x)
-        
-        # U-Net: encoder
-        residual_inputs = []
-        for down in self.downs:
-            x = down(x, t)
-            residual_inputs.append(x)
-        
-        for up in self.ups:
-            residual_x = residual_inputs.pop()
-            x = torch.cat((x, residual_x), dim=1)
-            x = up(x, t)
-        
-        return self.output(x)
-    
-schem_model = UNet3D()
-num_params_schem = sum(p.numel() for p in schem_model.parameters())
+        x = self.maxpool_conv(x)
+        emb = self.emb_layer(t)[:, :, None, None, None].repeat(1, 1, x.shape[-3], x.shape[-2], x.shape[-1])
+        return x + emb
 
 
+class Up(nn.Module):
+    def __init__(self, in_ch, out_ch, emb_dim=256):
+        super().__init__()
+
+        self.up = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=True)
+        self.conv = nn.Sequential(
+            DoubleConv(in_ch, in_ch, residual=True),
+            DoubleConv(in_ch, out_ch, in_ch // 2),
+        )
+
+        self.emb_layer = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(
+                emb_dim,
+                out_ch
+            ),
+        )
+
+    def forward(self, x, skip_x, t):
+        x = self.up(x)
+        x = torch.cat([skip_x, x], dim=1)
+        x = self.conv(x)
+        emb = self.emb_layer(t)[:, :, None, None, None].repeat(1, 1, x.shape[-3], x.shape[-2], x.shape[-1])
+        return x + emb
+
+
+class UNet(nn.Module):
+    def __init__(self, ch_in=1, ch_out=1, time_dim=256, device=PREFERRED_DEVICE):
+        super().__init__()
+        self.device = device
+        self.time_dim = time_dim
+
+        # downsampling
+        self.input = DoubleConv(ch_in, 64)
+        self.down1 = Down(64, 128)
+        self.sa1 = SelfAttention(128, 32)
+        self.down2 = Down(128, 256)
+        self.sa2 = SelfAttention(256, 16)
+        self.down3 = Down(256, 256)
+        self.sa3 = SelfAttention(256, 8)
+
+        # bottle neck
+        self.bot1 = DoubleConv(256, 512)
+        self.bot2 = DoubleConv(512, 512)
+        self.bot3 = DoubleConv(512, 256)
+
+        # upsampling
+        self.up1 = Up(512, 128)
+        self.sa4 = SelfAttention(128, 16)
+        self.up2 = Up(256, 64)
+        self.sa5 = SelfAttention(64, 32)
+        self.up3 = Up(128, 64)
+        self.sa6 = SelfAttention(64, 64)
+        self.output = nn.Conv3d(64, ch_out, kernel_size=1)
+
+    def pos_encoding(self, t, channels):
+        inv_freq = 1.0 / (
+            10000
+            ** (torch.arange(0, channels, 2, device=self.device).float() / channels)
+        )
+        pos_enc_a = torch.sin(t.repeat(1, channels // 2) * inv_freq)
+        pos_enc_b = torch.cos(t.repeat(1, channels // 2) * inv_freq)
+        pos_enc = torch.cat([pos_enc_a, pos_enc_b], dim=-1)
+        return pos_enc
+
+    def forward(self, x, t):
+        t = t.unsqueeze(-1).type(torch.float)
+        t = self.pos_encoding(t, self.time_dim)
+
+        x1 = self.input(x)
+        x2 = self.down1(x1, t)
+        x2 = self.sa1(x2)
+        x3 = self.down2(x2, t)
+        x3 = self.sa2(x3)
+        x4 = self.down3(x3, t)
+        x4 = self.sa3(x4)
+
+        x4 = self.bot1(x4)
+        x4 = self.bot2(x4)
+        x4 = self.bot3(x4)
+
+        x = self.up1(x4, x3, t)
+        x = self.sa4(x)
+        x = self.up2(x, x2, t)
+        x = self.sa5(x)
+        x = self.up3(x, x1, t)
+        x = self.sa6(x)
+        output = self.output(x)
+        return output
+
+
+# --------------------------------------
+# Utility functions
 # ---------------------------------------
-# Training functions
-# ---------------------------------------
 
-def save_checkpoint(state, filepath="checkpoint.pth.tar"):
+
+def save_checkpoint(state, filepath):
     print("=> Saving checkpoint")
     torch.save(state, filepath)
 
-def load_checkpoint(filepath="src/saved_models/checkpoint.pth.tar"):
+def load_checkpoint(filepath, model, optimizer):
     print("=> Loading checkpoint")
     checkpoint = torch.load(filepath)
-    schem_model.load_state_dict(checkpoint['state_dict'])
+    model.load_state_dict(checkpoint['state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer'])
     start_epoch = checkpoint['epoch']
-    
+
     return start_epoch
 
-def get_loss(model, x_0, t):
-    x_noisy, noise = forward_diffusion_sample(x_0, t, device)
-    noise_pred = model(x_noisy, t)
-    return F.l1_loss(noise, noise_pred)
-
-@torch.no_grad()
-def sample_timestep(model, x, t):
-    betas_t = get_index_from_list(betas, t, x.shape)
-    sqrt_one_minus_alphas_cumprod_t = get_index_from_list(
-        sqrt_one_minus_alphas_cumprod, t, x.shape
-    )
-    sqrt_recip_alphas_t = get_index_from_list(sqrt_recip_alphas, t, x.shape)
-
-    model_mean = sqrt_recip_alphas_t * (
-        x - betas_t * model(x, t) / sqrt_one_minus_alphas_cumprod_t
-    )
-    posterior_variance_t = get_index_from_list(posterior_variance, t, x.shape)
-
-    if t == 0:
-        return model_mean
-    else:
-        noise = torch.randn_like(x)
-        return model_mean + torch.sqrt(posterior_variance_t) * noise 
-
-@torch.no_grad()
-def sample_schem():
-    '''
-    Function to create random noise, feed it to the model, and create the output schematic 
-    '''
-
-    # Sample noise
-    blocks = torch.randn((1, 1, SCHEM_SHAPE[0], SCHEM_SHAPE[1], SCHEM_SHAPE[2]), device=device)
-
-    # compute final schematic with the noise removed
-    for i in range(0, T)[::-1]:
-        t = torch.full((1,), i, device=device, dtype=torch.long)
-        blocks = sample_timestep(schem_model, blocks, t)
-
-    # clamp the image to the range [-1, 1] and move it to CPU
-    blocks = torch.clamp(blocks, -1.0, 1.0)
-    blocks = blocks.detach().cpu()
-    create_schematic_from_tensor("src/data/output_schematics/output.schematic", blocks, SCHEM_SHAPE)
-    print(f'=> output schematic created')
+def setup():
+    os.makedirs("runs", exist_ok=True)
+    os.makedirs(f"runs/{RUN_NAME}/models", exist_ok=True)
+    os.makedirs(f"runs/{RUN_NAME}/results", exist_ok=True)
 
 
+
+# --------------------------------------
+# Training
 # ---------------------------------------
-# Training - 3D Diffusion Model for MC Schematics
-# ---------------------------------------         
 
 
-# configuring the devices / metal support for mac gpu
-device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
-optimizer = Adam(schem_model.parameters(), LEARNING_RATE)
-schem_model.to(device)
+device = PREFERRED_DEVICE
+model = UNet().to(device)
+optimizer = optim.AdamW(model.parameters(), LEARNING_RATE)
+mse = nn.MSELoss()
+diffusion = NoiseSchedular()
+writer = SummaryWriter(f"runs/{RUN_NAME}/logs")
+l = len(dataloader)
 
-
-# prompt
-print("==============================")
-print(f"3D minecraft No. Model Params: {num_params_schem} \n\n\
-Training on device: {device}")
-print("==============================\n")
-
-
-# load the model, optimizer, and epochs
+# load an existing model
 start_epoch = 0
-if LOAD_MODEL:
-    start_epoch = load_checkpoint()
+if LOAD_MODEL: start_epoch = load_checkpoint(CKPT_FILEPATH, model, optimizer)
 
-# iterate through epochs
-for epoch in range(start_epoch, EPOCHS):
-    for step, batch in enumerate(schem_data_loader):
-        optimizer.zero_grad()
-        t = torch.randint(0, T, (BATCH_SIZE,), device=device).long()
-        loss = get_loss(schem_model, batch, t)
-        loss.backward()
-        optimizer.step()
 
-        print(f"Epoch {epoch} | step {step:03d} -- Loss: {loss.item():.3f}")
+
+if TRAIN:
+    setup()
+    for epoch in range(start_epoch, EPOCHS):
+        logging.info(f"Epoch {epoch}:")
+        pbar = tqdm(dataloader)
+        for i, (schematics, _) in enumerate(pbar):
+            schematics = schematics.to(device)
+            t = diffusion.sample_timesteps(schematics.shape[0]).to(device)
+            x_t, noise = diffusion.noise_schematics(schematics, t)
+
+            predicted_noise = model(x_t, t)
+            loss = mse(noise, predicted_noise)
+
+            optimizer.zero_grad() # reset previous gradients
+            loss.backward() # compute the loss
+            optimizer.step() # update the parameters
+        
+            pbar.set_postfix(Loss=loss.item())
+            writer.add_scalar("Loss", loss.item(), global_step=epoch * l + i)
+
+        if epoch % 100 == 0:
+            sampled_schematics = diffusion.sample(model)
+     
+            #create_schematic_from_tensor(f"runs/{RUN_NAME}/results/expected.schematic", next(iter(dataloader))[0])
+            create_schematic_from_tensor(f"runs/{RUN_NAME}/results/{epoch}.schematic", sampled_schematics)
+
+            state = {
+                'state_dict': model.state_dict(), 
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch + 1
+            }
+
+            save_checkpoint(state, f"runs/{RUN_NAME}/models/ckpt.pt")
     
-        # save the model every x epochs
-    if epoch % 50 == 0:
-        state = {
-            'state_dict': schem_model.state_dict(), 
-            'optimizer': optimizer.state_dict(),
-            'epoch': epoch + 1
-        }
-        save_checkpoint(state)
-        sample_schem()
+
+
+
+
+

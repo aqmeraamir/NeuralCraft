@@ -1,6 +1,0 @@
-matplotlib
-numpy
-pillow
-nbtlib
-torchvision
-scipy
