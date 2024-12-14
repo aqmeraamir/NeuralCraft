@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # constants
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCHEM_SHAPE = (8, 8, 8)
+SCHEM_SHAPE = (32, 32, 32 )
 RUN_NAME = "stable-diffusion"
 TRAIN = True
 LOAD_MODEL = False
