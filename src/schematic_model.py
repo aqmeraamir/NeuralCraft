@@ -29,7 +29,7 @@ CKPT_FILEPATH = "ckpt.pt"
 PREFERRED_DEVICE = "cuda"
 T = 1000                                                                                                                 
 EPOCHS = 10000
-BATCH_SIZE = 12
+BATCH_SIZE = 16
 LEARNING_RATE = 0.0003
 
 
