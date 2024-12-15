@@ -26,7 +26,7 @@ CKPT_FILEPATH = "ckpt.pt"
 
 
 # hyperparameters
-PREFERRED_DEVICE = "cpu"
+PREFERRED_DEVICE = "cuda"
 T = 1000                                                                                                                 
 EPOCHS = 10000
 BATCH_SIZE = 12
@@ -52,11 +52,16 @@ class SchematicsDataset(Dataset):
         return len(self.schematics)
     
     def __getitem__(self, idx):
-        schematic_path = self.schematics[idx]
-        blocks, dimensions, _ = read_schematic(schematic_path) 
-        blocks_tensor = transform_blocks(blocks, dimensions)
+        try:
+            schematic_path = self.schematics[idx]
+            blocks, dimensions, _ = read_schematic(schematic_path) 
+            blocks_tensor = transform_blocks(blocks, dimensions)
 
-        return blocks_tensor, 0
+            return blocks_tensor, 0
+        
+        except Exception as e:
+                print(f"Error processing schematic at index {idx}: {e}")
+                return None
 
 
 def transform_blocks(blocks, original_dimensions, target_dimensions=SCHEM_SHAPE):
@@ -401,6 +406,8 @@ if TRAIN:
         logging.info(f"Epoch {epoch}:")
         pbar = tqdm(dataloader)
         for i, (schematics, _) in enumerate(pbar):
+            if schematics is None:
+                continue
             schematics = schematics.to(device)
             t = diffusion.sample_timesteps(schematics.shape[0]).to(device)
             x_t, noise = diffusion.noise_schematics(schematics, t)
