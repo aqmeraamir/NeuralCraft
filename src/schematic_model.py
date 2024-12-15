@@ -18,7 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # constants
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCHEM_SHAPE = (32, 32, 32)
+SCHEM_SHAPE = (8, 8, 8)
 RUN_NAME = "entire_dataset"
 TRAIN = True
 LOAD_MODEL = False
@@ -408,7 +408,7 @@ if TRAIN:
         for i, (schematics, _) in enumerate(pbar):
             if torch.all(schematics == -1):
                 continue
-            
+
             schematics = schematics.to(device)
             t = diffusion.sample_timesteps(schematics.shape[0]).to(device)
             x_t, noise = diffusion.noise_schematics(schematics, t)
