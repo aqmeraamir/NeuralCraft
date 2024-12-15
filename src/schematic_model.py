@@ -5,11 +5,9 @@
 import os
 import logging
 
-from matplotlib import pyplot as plt
 from tqdm import tqdm
 from schematic_manager import read_schematic, create_schematic
 import numpy as np
-
 
 import torch
 import torch.nn.functional as F
@@ -20,8 +18,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 # constants
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCHEM_SHAPE = (8,8,8)
-RUN_NAME = "stable-diffusion"
+SCHEM_SHAPE = (32, 32, 32)
+RUN_NAME = "entire_dataset"
 TRAIN = True
 LOAD_MODEL = False
 CKPT_FILEPATH = "ckpt.pt"
@@ -31,7 +29,7 @@ CKPT_FILEPATH = "ckpt.pt"
 PREFERRED_DEVICE = "cpu"
 T = 1000                                                                                                                 
 EPOCHS = 10000
-BATCH_SIZE = 1
+BATCH_SIZE = 12
 LEARNING_RATE = 0.0003
 
 
@@ -62,16 +60,19 @@ class SchematicsDataset(Dataset):
 
 
 def transform_blocks(blocks, original_dimensions, target_dimensions=SCHEM_SHAPE):
-    '''
+    """
     transforms the 'blocks' array from a .schematic file to specified dimensions, and turns it into a tensor for pytorch
-    '''
-    blocks = [-1 if id == 0 else 1 for id in blocks] # normalize values to -1 and 1 respectively
-    
-    blocks_tensor = torch.tensor(blocks, dtype=torch.float) # convert to tensor
-    blocks_tensor = blocks_tensor.view(original_dimensions) # convert to 3d array 
 
-    blocks_tensor = blocks_tensor.unsqueeze(0).unsqueeze(0)
-    blocks_tensor = F.interpolate(blocks_tensor, size=target_dimensions, mode='nearest') # resize 
+    Returns:
+        torch.Tensor: Resized tensor of shape (1, D, H, W).
+    """
+
+    blocks_tensor = torch.tensor(blocks, dtype=torch.float) # convert to tensor
+    blocks_tensor = torch.where(blocks_tensor == 0, torch.tensor(-1.0), torch.tensor(1.0)) # normalize values to -1 and 1 respectively    
+    blocks_tensor = blocks_tensor.view(original_dimensions) # convert to 3d array [d*h*w] -> [D, H, W]
+    blocks_tensor = blocks_tensor.unsqueeze(0).unsqueeze(0) # add channel & batch dimension [1, 1, D, H, W]
+
+    blocks_tensor = F.interpolate(blocks_tensor, size=target_dimensions, mode='nearest') # resize [1, 1, (target_dimensions)]
 
     return blocks_tensor[0, :, :, :]
 
@@ -86,14 +87,15 @@ def create_schematic_from_tensor(filepath, blocks_tensor, dimensions=SCHEM_SHAPE
         blocks = blocks[0, :, :, :].flatten()
 
     if data is None: 
-        data = data = np.zeros_like(blocks) # create an empty array of 0s the same size as blocks
+        data = np.zeros_like(blocks) 
 
     #ensure no invalid ids
-    blocks = np.where(blocks < 0, 0, 1).astype(int)
+    blocks = (blocks + 1) / 2
+    blocks = np.where(np.round(blocks) == 1, 1, 0).astype(int)
     
     if np.prod(dimensions) != len(blocks):
-        print(f"Error creating schematic ({filepath}), invalid dimensions for the given blocks array")
-        return -1
+        raise ValueError(f"Error creating schematic ({filepath}), invalid dimensions for the given blocks array")
+        
     
     create_schematic(filepath, blocks, data, dimensions)
 
@@ -184,20 +186,20 @@ class SelfAttention(nn.Module):
 
     def forward(self, x):
         
-        # Infer `self.size` dynamically
-        spatial_dims = x.shape[2:]  # Get spatial dimensions (D, H, W)
+        # infer `self.size` dynamically
+        spatial_dims = x.shape[2:]  # spatial dimensions (D, H, W)
         num_elements = spatial_dims[0] * spatial_dims[1] * spatial_dims[2]
 
-        # Reshape: (batch, channel, depth*height*width) -> (batch, num_elements, channel)
+        # reshape: (batch, channel, depth*height*width) -> (batch, num_elements, channel)
         x = x.view(-1, self.ch, num_elements).swapaxes(1, 2)
 
-        # Apply layer norm and attention
+        # apply layer norm and attention
         x_ln = self.layer_norm(x)
         attention_value, _ = self.attention(x_ln, x_ln, x_ln)
         attention_value = attention_value + x
         attention_value = self.feed_forward_sub(attention_value) + attention_value
 
-        # Reshape back to (batch, channel, depth, height, width)
+        # reshape back to (batch, channel, depth, height, width)
         return attention_value.swapaxes(2, 1).view(-1, self.ch, *spatial_dims)
 
 
@@ -272,17 +274,13 @@ class Up(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, ch_out=1, time_dim=256, id_embedding_dim=16, device=PREFERRED_DEVICE):
+    def __init__(self, ch_in=1, ch_out=1, time_dim=256, device=PREFERRED_DEVICE):
         super().__init__()
         self.device = device
         self.time_dim = time_dim
 
-        # embedding layer for id's
-        self.id_embedding = nn.Embedding(2, id_embedding_dim)
-        self.id_embedding_dim = id_embedding_dim
-
         # downsampling
-        self.input = DoubleConv(id_embedding_dim, 64)
+        self.input = DoubleConv(ch_in, 64)
         self.down1 = Down(64, 128)
         self.sa1 = SelfAttention(128, 32)
         self.down2 = Down(128, 256)
@@ -317,11 +315,6 @@ class UNet(nn.Module):
     def forward(self, x, t):
         t = t.unsqueeze(-1).type(torch.float)
         t = self.pos_encoding(t, self.time_dim)
-
-        x = torch.where(x==-1, 0, 1)
-        x = self.id_embedding(x)
-        x = x.permute(0, 5, 2, 3, 4, 1).squeeze(-1)
-
 
         x1 = self.input(x)
         x2 = self.down1(x1, t)
@@ -377,7 +370,15 @@ def setup():
 
 
 device = PREFERRED_DEVICE
+
 model = UNet().to(device)
+
+if torch.cuda.device_count() > 1:
+    logging.info(f"Using {torch.cuda.device_count()} GPUs")
+    model = nn.DataParallel(model)
+
+#model = model.to(device)
+
 optimizer = optim.AdamW(model.parameters(), LEARNING_RATE)
 mse = nn.MSELoss()
 diffusion = NoiseSchedular()
@@ -388,7 +389,10 @@ l = len(dataloader)
 start_epoch = 0
 if LOAD_MODEL: start_epoch = load_checkpoint(CKPT_FILEPATH, model, optimizer)
 
-#create_schematic_from_tensor(f"TARGET.schematic", next(iter(dataloader))[0])
+
+
+
+create_schematic_from_tensor(f"runs/{RUN_NAME}/results/expected.schematic", next(iter(dataloader))[0])
 
 
 if TRAIN:
@@ -414,7 +418,7 @@ if TRAIN:
         if epoch % 100 == 0:
             sampled_schematics = diffusion.sample(model, 3)
      
-            for i, sampled_schematic in enumerate(sampled_schematics):
+            for sampled_schematic, i in enumerate(sampled_schematics):
                 create_schematic_from_tensor(f"runs/{RUN_NAME}/results/{epoch}-{i}.schematic", sampled_schematic)
 
             state = {
