@@ -61,7 +61,7 @@ class SchematicsDataset(Dataset):
         
         except Exception as e:
                 print(f"Error processing schematic at index {idx}: {e}")
-                return None
+                return torch.full((1,), -1), 0
 
 
 def transform_blocks(blocks, original_dimensions, target_dimensions=SCHEM_SHAPE):
@@ -406,8 +406,9 @@ if TRAIN:
         logging.info(f"Epoch {epoch}:")
         pbar = tqdm(dataloader)
         for i, (schematics, _) in enumerate(pbar):
-            if schematics is None:
+            if torch.all(schematics == -1):
                 continue
+            
             schematics = schematics.to(device)
             t = diffusion.sample_timesteps(schematics.shape[0]).to(device)
             x_t, noise = diffusion.noise_schematics(schematics, t)
