@@ -61,7 +61,7 @@ class SchematicsDataset(Dataset):
         
         except Exception as e:
                 print(f"Error processing schematic at index {idx}: {e}")
-                return torch.full((1,), -1), 0
+                return torch.zeros((1, 8, 8, 8)), 0
 
 
 def transform_blocks(blocks, original_dimensions, target_dimensions=SCHEM_SHAPE):
@@ -374,15 +374,15 @@ def setup():
 
 
 
-device = PREFERRED_DEVICE
+device = torch.device(PREFERRED_DEVICE)
 
-model = UNet().to(device)
+model = UNet()
 
 if torch.cuda.device_count() > 1:
     logging.info(f"Using {torch.cuda.device_count()} GPUs")
     model = nn.DataParallel(model)
 
-#model = model.to(device)
+model = model.to(device)
 
 optimizer = optim.AdamW(model.parameters(), LEARNING_RATE)
 mse = nn.MSELoss()
@@ -406,7 +406,7 @@ if TRAIN:
         logging.info(f"Epoch {epoch}:")
         pbar = tqdm(dataloader)
         for i, (schematics, _) in enumerate(pbar):
-            if torch.all(schematics == -1):
+            if torch.all(schematics == 0):
                 continue
 
             schematics = schematics.to(device)
