@@ -18,7 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # constants
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCHEM_SHAPE = (8, 8, 8)
+SCHEM_SHAPE = (32, 32, 32)
 RUN_NAME = "entire_dataset"
 TRAIN = True
 LOAD_MODEL = False
@@ -397,7 +397,7 @@ if LOAD_MODEL: start_epoch = load_checkpoint(CKPT_FILEPATH, model, optimizer)
 
 
 
-create_schematic_from_tensor(f"runs/{RUN_NAME}/results/expected.schematic", next(iter(dataloader))[0])
+#create_schematic_from_tensor(f"runs/{RUN_NAME}/results/expected.schematic", next(iter(dataloader))[0])
 
 
 if TRAIN:
